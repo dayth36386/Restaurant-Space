@@ -1,0 +1,164 @@
+name: restaurant-space
+
+services:
+  api:
+    build: ./BE
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    environment:
+      HTTP_ADDR: :8080
+      DB_HOST: mysql:3306
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-restaurant_space}
+      MYSQL_USER: ${MYSQL_USER:-restaurant}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-restaurant_dev_password}
+      JWT_SECRET: ${JWT_SECRET:-local-development-only-change-this-secret-32bytes}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-true}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:8080}
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-restaurant-images}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-restaurant-app}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-restaurant_s3_dev_password}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Google redirects to the web app, which forwards state/code to the API.
+      GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-http://localhost:3000/auth/google/callback}
+      SMTP_ADDR: mailpit:1025
+      SMTP_FROM: ${SMTP_FROM:-noreply@restaurant.local}
+      PASSWORD_RESET_URL: ${PASSWORD_RESET_URL:-http://localhost:3000/reset-password}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      mailpit:
+        condition: service_started
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./FE
+      args:
+        NEXT_PUBLIC_API_URL: ${API_PUBLIC_URL:-http://localhost:8080}
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  # Browser UI for the dev database: http://localhost:8081 (server "mysql").
+  adminer:
+    image: adminer:5.3.0
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql
+    ports:
+      - "127.0.0.1:${ADMINER_PORT:-8081}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  mailpit:
+    image: axllent/mailpit:v1.32.0
+    ports:
+      - "127.0.0.1:${MAILPIT_PORT:-8025}:8025"
+      - "127.0.0.1:${SMTP_PORT:-1025}:1025"
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-restaurant_space}
+      MYSQL_USER: ${MYSQL_USER:-restaurant}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-restaurant_dev_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_dev_password}
+      TZ: UTC
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--default-time-zone=+00:00"]
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysql -h 127.0.0.1 -u\"$$MYSQL_USER\" \"$$MYSQL_DATABASE\" -e 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  migrate:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./BE/migrations:/migrations:ro
+    entrypoint: ["migrate", "-path", "/migrations", "-database", "mysql://${MYSQL_USER:-restaurant}:${MYSQL_PASSWORD:-restaurant_dev_password}@tcp(mysql:3306)/${MYSQL_DATABASE:-restaurant_space}?multiStatements=true"]
+    command: ["up"]
+    restart: "no"
+
+  minio:
+    build:
+      context: ./infra/minio
+      target: minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio_dev_password}
+    ports:
+      - "127.0.0.1:${S3_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    build:
+      context: ./infra/minio
+      target: mc
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio_dev_password}
+      S3_BUCKET: ${S3_BUCKET:-restaurant-images}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-restaurant-app}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-restaurant_s3_dev_password}
+    volumes:
+      - ./infra/minio/init.sh:/init.sh:ro
+    entrypoint: ["/bin/sh", "/init.sh"]
+    restart: "no"
+
+  api-smoke:
+    profiles: ["test"]
+    image: python:3.13-slim
+    environment:
+      API_URL: http://api:8080
+      S3_TEST_HOST: minio:9000
+    depends_on:
+      api:
+        condition: service_started
+    volumes:
+      - ./BE/tests/api-smoke.py:/test.py:ro
+    command: ["python", "/test.py"]
+
+  storage-smoke:
+    profiles: ["test"]
+    build:
+      context: ./infra/minio
+      target: mc
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      S3_BUCKET: ${S3_BUCKET:-restaurant-images}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-restaurant-app}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-restaurant_s3_dev_password}
+    volumes:
+      - ./BE/tests/storage-smoke.sh:/test.sh:ro
+    entrypoint: ["/bin/sh", "/test.sh"]
+
+volumes:
+  mysql_data:
+  minio_data:

@@ -1,0 +1,130 @@
+# Production stack: Caddy (HTTPS) -> web + api, MySQL and migrations.
+# Images live in external S3/R2 and mail goes through a real SMTP provider, so
+# MinIO, Mailpit and Adminer from the dev compose are intentionally absent.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# See DEPLOY.md.
+name: restaurant-space-prod
+
+services:
+  caddy:
+    image: caddy:2.10.2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      WEB_DOMAIN: ${WEB_DOMAIN:?set WEB_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN:?set API_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
+      CADDY_GLOBAL_EXTRA: ${CADDY_GLOBAL_EXTRA:-}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+      - api
+    restart: unless-stopped
+    networks:
+      edge:
+        # Fixed so the API can trust exactly this proxy's X-Forwarded-For.
+        ipv4_address: 172.30.0.10
+
+  web:
+    build:
+      context: ./FE
+      args:
+        NEXT_PUBLIC_API_URL: https://${API_DOMAIN}
+        NEXT_PUBLIC_MAP_TILE_URL: ${NEXT_PUBLIC_MAP_TILE_URL:-}
+        NEXT_PUBLIC_MAP_ATTRIBUTION: ${NEXT_PUBLIC_MAP_ATTRIBUTION:-}
+    restart: unless-stopped
+    networks:
+      - edge
+
+  api:
+    build: ./BE
+    environment:
+      HTTP_ADDR: :8080
+      DB_HOST: ${DB_HOST:-mysql:3306}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-restaurant_space}
+      MYSQL_USER: ${MYSQL_USER:-restaurant}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (32+ random bytes)}
+      COOKIE_SECURE: "true"
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      WEB_ORIGIN: https://${WEB_DOMAIN}
+      API_PUBLIC_URL: https://${API_DOMAIN}
+      TRUSTED_PROXIES: 172.30.0.10
+      S3_ENDPOINT: ${S3_ENDPOINT:?set S3_ENDPOINT}
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-${S3_ENDPOINT}}
+      S3_REGION: ${S3_REGION:-auto}
+      S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URL: https://${WEB_DOMAIN}/auth/google/callback
+      SMTP_ADDR: ${SMTP_ADDR:?set SMTP_ADDR}
+      SMTP_FROM: ${SMTP_FROM:?set SMTP_FROM}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_TLS: ${SMTP_TLS:-starttls}
+      PASSWORD_RESET_URL: https://${WEB_DOMAIN}/reset-password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - edge
+      - data
+
+  migrate:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./BE/migrations:/migrations:ro
+    entrypoint: ["migrate", "-path", "/migrations", "-database", "mysql://${MYSQL_USER:-restaurant}:${MYSQL_PASSWORD}@tcp(${DB_HOST:-mysql:3306})/${MYSQL_DATABASE:-restaurant_space}?multiStatements=true"]
+    command: ["up"]
+    restart: "no"
+    networks:
+      - data
+
+  # Remove this service and set DB_HOST when using a managed MySQL instead.
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-restaurant_space}
+      MYSQL_USER: ${MYSQL_USER:-restaurant}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+      TZ: UTC
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--default-time-zone=+00:00"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysql -h 127.0.0.1 -u\"$$MYSQL_USER\" \"$$MYSQL_DATABASE\" -e 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - data
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  # No route to the internet: only the API and migrations reach MySQL.
+  data:
+    internal: true
+
+volumes:
+  mysql_data:
+  caddy_data:
+  caddy_config:

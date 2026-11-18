@@ -1,0 +1,28 @@
+# Automatic HTTPS (Let's Encrypt) for the web app and the API.
+# WebSocket upgrades (/api/v1/ws) are proxied without extra configuration.
+{
+	email {$ACME_EMAIL}
+	# Empty in production. Set CADDY_GLOBAL_EXTRA=local_certs to use Caddy's own CA
+	# for staging or local rehearsals with domains Let's Encrypt cannot reach.
+	{$CADDY_GLOBAL_EXTRA}
+}
+
+(common) {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
+{$WEB_DOMAIN} {
+	import common
+	reverse_proxy web:3000
+}
+
+{$API_DOMAIN} {
+	import common
+	reverse_proxy api:8080
+}

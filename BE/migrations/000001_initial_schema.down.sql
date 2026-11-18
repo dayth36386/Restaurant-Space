@@ -1,0 +1,27 @@
+ALTER TABLE conversation_members DROP FOREIGN KEY fk_member_read_message;
+
+DROP TABLE notifications;
+DROP TABLE moderation_actions;
+DROP TABLE reports;
+DROP TABLE messages;
+DROP TABLE conversation_members;
+DROP TABLE conversations;
+DROP TABLE collection_restaurants;
+DROP TABLE collections;
+DROP TABLE bookmarks;
+DROP TABLE restaurant_ratings;
+DROP TABLE restaurant_likes;
+DROP TABLE comments;
+DROP TABLE restaurant_tags;
+DROP TABLE restaurant_categories;
+DROP TABLE tags;
+DROP TABLE categories;
+DROP TABLE restaurant_menus;
+DROP TABLE restaurant_images;
+DROP TABLE restaurants;
+DROP TABLE password_reset_tokens;
+DROP TABLE refresh_sessions;
+DROP TABLE oauth_accounts;
+DROP TABLE user_profile_images;
+DROP TABLE media_objects;
+DROP TABLE users;
